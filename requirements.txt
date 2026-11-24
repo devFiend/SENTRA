@@ -1,0 +1,5 @@
+# SENTRA Production & Development Dependencies
+opencv-python>=4.8.0
+numpy>=1.24.0
+pygame-ce>=2.5.0
+pytest>=8.0.0
