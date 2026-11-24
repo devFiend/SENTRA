@@ -69,8 +69,10 @@ def render_live_overlays(
         gx, gy = int(track.ground_anchor[0]), int(track.ground_anchor[1])
         pygame.draw.circle(surface, color, (gx, gy), 4)
 
-        # Track badge tag
-        tag = f"#{track.track_id} {track.class_name.upper()} ({int(track.speed)} px/s)"
+        # Track badge tag: clean anonymous subject label
+        tag = f"SUBJECT #{track.track_id} • {track.class_name.upper()}"
+        if track.speed > 25:
+            tag += f" ({int(track.speed)} px/s)"
         tag_surf = small_font.render(tag, True, COLOR_BACKGROUND)
         tag_w = tag_surf.get_width() + 8
         tag_h = tag_surf.get_height() + 4
@@ -100,6 +102,6 @@ def render_top_status_bar(
     surface.blit(small_font.render(cam_status_text, True, COLOR_TEXT_PRIMARY), (32, 11))
 
     # Diagnostics
-    diag_text = f"FPS: {fps:04.1f} | TRACKS: {active_tracks_count} | RECORDING: OFF"
+    diag_text = f"ACTIVE SUBJECTS: {active_tracks_count} | FPS: {fps:04.1f} | 100% LOCAL"
     diag_surf = small_font.render(diag_text, True, COLOR_TEXT_MUTED)
     surface.blit(diag_surf, (screen_width - diag_surf.get_width() - 20, 11))

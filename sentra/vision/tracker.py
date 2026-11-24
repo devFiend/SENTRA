@@ -1,4 +1,4 @@
-"""Multi-object anonymous tracker with IoU association and trajectory analysis."""
+"""Multi-object anonymous tracker with IoU association, centroid recovery, and trajectory analysis."""
 from dataclasses import dataclass, field
 import math
 import time
@@ -63,7 +63,7 @@ class TrackedObject:
         self.hits += 1
         self.time_since_update = 0.0
 
-        if self.hits >= MIN_TRACK_HITS:
+        if self.hits >= MIN_TRACK_HITS or self.confidence >= 0.8:
             self.is_confirmed = True
 
         cx, cy = self.centroid
@@ -104,7 +104,7 @@ def compute_iou(box_a: Tuple[int, int, int, int], box_b: Tuple[int, int, int, in
 class ObjectTracker:
     """
     Associates frame detections across time into anonymous tracked subjects.
-    Maintains temporary IDs and velocity histories without storing biometrics.
+    Maintains stable temporal IDs without storing biometrics or face data.
     """
 
     def __init__(
@@ -114,9 +114,16 @@ class ObjectTracker:
     ):
         self.iou_threshold = iou_threshold
         self.max_age_frames = max_age_frames
-        self._next_id: int = 1
         self.tracks: Dict[int, TrackedObject] = {}
         self.total_tracked_count: int = 0
+
+    def _allocate_id(self) -> int:
+        """Allocate lowest unused positive integer ID (e.g. #1 for a single person)."""
+        used_ids = set(self.tracks.keys())
+        cand = 1
+        while cand in used_ids:
+            cand += 1
+        return cand
 
     def update(self, detections: List[DetectedObject], timestamp: float) -> List[TrackedObject]:
         """Update tracker with frame detections and return active confirmed tracks."""
@@ -125,7 +132,7 @@ class ObjectTracker:
         matched_pairs: List[Tuple[int, int]] = []
 
         if active_track_ids and detections:
-            # Build IoU cost matrix
+            # 1. Primary IoU Association
             matches = []
             for t_id in active_track_ids:
                 track = self.tracks[t_id]
@@ -147,6 +154,27 @@ class ObjectTracker:
                     matched_pairs.append((t_id, d_idx))
                     unmatched_detections.discard(d_idx)
 
+            # 2. Fallback Centroid Proximity Recovery for posture shifts/turns
+            remaining_track_ids = [t_id for t_id in active_track_ids if t_id not in used_tracks]
+            for t_id in remaining_track_ids:
+                track = self.tracks[t_id]
+                best_dist = 220.0  # max allowable jump in px
+                best_d_idx = None
+                for d_idx in list(unmatched_detections):
+                    det = detections[d_idx]
+                    if track.class_name == det.class_name:
+                        dist = math.hypot(
+                            track.centroid[0] - det.centroid[0],
+                            track.centroid[1] - det.centroid[1]
+                        )
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_d_idx = d_idx
+                if best_d_idx is not None:
+                    used_tracks.add(t_id)
+                    matched_pairs.append((t_id, best_d_idx))
+                    unmatched_detections.discard(best_d_idx)
+
         # Update matched tracks
         for t_id, d_idx in matched_pairs:
             self.tracks[t_id].update(detections[d_idx], timestamp)
@@ -159,11 +187,10 @@ class ObjectTracker:
                 if self.tracks[t_id].time_since_update > self.max_age_frames:
                     del self.tracks[t_id]
 
-        # Birth new tracks for remaining detections
+        # Birth new tracks for remaining detections using lowest available ID
         for d_idx in unmatched_detections:
             det = detections[d_idx]
-            new_id = self._next_id
-            self._next_id += 1
+            new_id = self._allocate_id()
             self.total_tracked_count += 1
 
             track = TrackedObject(
@@ -172,7 +199,15 @@ class ObjectTracker:
                 bbox=det.bbox,
                 confidence=det.confidence
             )
+            # High-confidence detections (like MediaPipe) confirm immediately
+            if det.confidence >= 0.8:
+                track.is_confirmed = True
+
             track.history.append((det.centroid[0], det.centroid[1], timestamp))
             self.tracks[new_id] = track
 
-        return list(self.tracks.values())
+        # Return stable confirmed tracks (suppressing transient 1-frame noise)
+        return [
+            t for t in self.tracks.values()
+            if t.is_confirmed or t.age_frames >= 2 or t.confidence >= 0.8
+        ]
