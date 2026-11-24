@@ -26,6 +26,11 @@ desktop.ini
 *.swp
 *.swo
 
+# Models
+models/
+*.task
+*.tflite
+
 # Video recordings (opt-in clips)
 recordings/
 *.mp4
