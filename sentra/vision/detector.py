@@ -73,7 +73,6 @@ class VisionDetector:
         h, w = frame.shape[:2]
         detections: List[DetectedObject] = []
 
-        # 1. HOG Person Detection (lightweight CPU native)
         # Downscale for performance if frame is large
         scale = 1.0
         if w > 640:
@@ -82,33 +81,70 @@ class VisionDetector:
         else:
             small_frame = frame
 
-        boxes, weights = self._hog.detectMultiScale(
-            small_frame,
-            winStride=(8, 8),
-            padding=(4, 4),
-            scale=1.05
-        )
+        # 1. HOG Person Detection (if available in this OpenCV build)
+        if self._hog is not None:
+            try:
+                boxes, weights = self._hog.detectMultiScale(
+                    small_frame,
+                    winStride=(8, 8),
+                    padding=(4, 4),
+                    scale=1.05
+                )
 
-        for (bx, by, bw, bh), weight in zip(boxes, weights):
-            conf = float(weight) if isinstance(weight, (int, float)) else float(weight[0])
-            # Rescale back to original resolution
-            orig_x1 = int(bx / scale)
-            orig_y1 = int(by / scale)
-            orig_x2 = int((bx + bw) / scale)
-            orig_y2 = int((by + bh) / scale)
+                for (bx, by, bw, bh), weight in zip(boxes, weights):
+                    conf = float(weight) if isinstance(weight, (int, float)) else float(weight[0])
+                    orig_x1 = max(0, min(w - 1, int(bx / scale)))
+                    orig_y1 = max(0, min(h - 1, int(by / scale)))
+                    orig_x2 = max(0, min(w - 1, int((bx + bw) / scale)))
+                    orig_y2 = max(0, min(h - 1, int((by + bh) / scale)))
 
-            orig_x1 = max(0, min(w - 1, orig_x1))
-            orig_y1 = max(0, min(h - 1, orig_y1))
-            orig_x2 = max(0, min(w - 1, orig_x2))
-            orig_y2 = max(0, min(h - 1, orig_y2))
+                    if orig_x2 > orig_x1 and orig_y2 > orig_y1:
+                        detections.append(DetectedObject(
+                            class_id=0,
+                            class_name="person",
+                            confidence=min(1.0, max(0.5, conf)),
+                            bbox=(orig_x1, orig_y1, orig_x2, orig_y2)
+                        ))
+            except Exception:
+                pass
 
-            if orig_x2 > orig_x1 and orig_y2 > orig_y1:
-                detections.append(DetectedObject(
-                    class_id=0,
-                    class_name="person",
-                    confidence=min(1.0, max(0.5, conf)),
-                    bbox=(orig_x1, orig_y1, orig_x2, orig_y2)
-                ))
+        # 2. MOG2 Motion & Foreground Contour Analysis (Fast, universal fallback)
+        if self._bg_subtractor is not None:
+            fg_mask = self._bg_subtractor.apply(small_frame)
+            _, thresh = cv2.threshold(fg_mask, 200, 255, cv2.THRESH_BINARY)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+            thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                # Rescaled min area (equivalent to ~2500px on full frame)
+                if area > 800 * (scale ** 2):
+                    bx, by, bw, bh = cv2.boundingRect(cnt)
+                    orig_x1 = max(0, min(w - 1, int(bx / scale)))
+                    orig_y1 = max(0, min(h - 1, int(by / scale)))
+                    orig_x2 = max(0, min(w - 1, int((bx + bw) / scale)))
+                    orig_y2 = max(0, min(h - 1, int((by + bh) / scale)))
+
+                    actual_w = orig_x2 - orig_x1
+                    actual_h = orig_y2 - orig_y1
+
+                    if actual_h > 60 and actual_w > 25:
+                        ar = actual_h / float(actual_w)
+                        cls_name = "person" if (ar >= 1.2 or actual_h > 120) else "object"
+                        # Only add if not overlapping existing HOG box
+                        already_detected = any(
+                            abs(orig_x1 - d.bbox[0]) < 40 and abs(orig_y1 - d.bbox[1]) < 40
+                            for d in detections
+                        )
+                        if not already_detected:
+                            detections.append(DetectedObject(
+                                class_id=0 if cls_name == "person" else 1,
+                                class_name=cls_name,
+                                confidence=0.78,
+                                bbox=(orig_x1, orig_y1, orig_x2, orig_y2)
+                            ))
 
         return detections
 
